@@ -15,8 +15,8 @@ data segment ;定義迷宮大小
 	playerY db 1 ; col : (0, 0) 是牆
 
 	; 終點座標
-	goalX db 21 ; row
-	goalY db 21 ; col (23, 23)
+	goalX db 2 ; row
+	goalY db 2 ; col (23, 23)
 
 	; 牆壁 = '#', 路 = '.', 不可視範圍 = '?', 玩家 = 'P', 終點 = 'O' 沒有為什麼 就是看起來很像一個洞.
 	; 定義符號
@@ -47,6 +47,16 @@ data segment ;定義迷宮大小
 
 	fogArr equ 9 ; 用於可視化地圖, 紀錄每次 player 移動後的可視位置
 	fogSize equ 3 ; 設定迷霧大小 以正方形的邊長表示, 上面的 fodArr 則需是 fogSize^2, 最好是 '奇數' 這樣才有中心點
+
+	; 最後是改變 輸出的顏色 讓 牆, 玩家, 路 有明顯區分, 不然眼睛好痛
+    ; 根據 註3. 找到的 ANSI wiki 裡面說道 算了 寫在 report 裡面好了, 我繼續把註解當作文打, report 真的要沒東西用
+
+    ; 先定義會使用到的顏色 
+    ; labelName db "content", 結尾符號
+	redWall db 27, "[31m", '$' ; 27寫在外面 因為我們需要保留他的 ASCII -> ESC , 31m 則是紅色的前景色代碼
+    blueGoal db 27, "[1;34m", '$' ; 藍色看起來像傳送門, 跟 O 很搭
+	resetColor db 27, "[0m", '$' ; 重設所有屬性用ESC[0m
+	
 data ends
 
 stack segment stack ; 沒有用到內建的 stack, 會放這個純粹因為 不寫 stack segment 每次 run masm code 時 他會在 terminal 跳一行 warning 很煩
@@ -384,6 +394,36 @@ printMap PROC
 		add ax, bx ; + y
 		mov si, ax ; 把 最後的得到第幾位的數字放進 si 當索引
 
+		mov al, visibleMap[si] ; 先偷看地圖內容, 判斷要用什麼顏色
+
+		mov ah, wall ; 牆
+		cmp ah, al
+		je isWall
+
+		mov ah, goal ; 終點
+		cmp ah, al
+		je isGoal
+
+		lea dx, resetColor ; 不在可視範圍的內容 用預設的黑色, 才不會有提前被看光的問題
+		mov ah, 09h
+		int 21h
+		jmp printChar
+
+	isWall:
+		lea dx, redWall
+		mov ah, 09h
+		int 21h
+		jmp printChar
+
+	isGoal:
+		lea dx, blueGoal
+		mov ah, 09h
+		int 21h
+		jmp printChar
+
+	printChar:
+		; 設定好顏色之後, 來這裡輸出
+		
 		mov dl, visibleMap[si] ; 印出當前位置的值
 		mov ah, 02h
 		int 21h

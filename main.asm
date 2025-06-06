@@ -1,8 +1,8 @@
 data segment ;定義迷宮大小
 
-	MAZE_ROWS equ 24 ; 24是 terminal 上限 可以更寬 但不能更長 row 不能再長了
-	MAZE_COLS equ 24
-	MAZE_SIZE equ MAZE_ROWS * MAZE_COLS ; 行*列 寫死 30*30
+	MAZE_ROWS equ 23 ; 24*24 是 terminal 上限 
+	MAZE_COLS equ 23 ; 但我怎麼處理 23 都會是他計算的上限 超過 23 之後 會印出至多到第24行 但實際地圖運算只到 23 行
+	MAZE_SIZE equ MAZE_ROWS * MAZE_COLS ; 行*列 寫死 23*23
 
 	; 想法是分成兩個地圖 實際地圖與玩家可視範圍
 
@@ -15,8 +15,8 @@ data segment ;定義迷宮大小
 	playerY db 1 ; col : (0, 0) 是牆
 
 	; 終點座標
-	goalX db 22 ; row
-	goalY db 22 ; col (28, 28)
+	goalX db 21 ; row
+	goalY db 21 ; col (23, 23)
 
 	; 牆壁 = '#', 路 = '.', 不可視範圍 = '?', 玩家 = 'P', 終點 = 'O' 沒有為什麼 就是看起來很像一個洞.
 	; 定義符號
@@ -45,11 +45,11 @@ data segment ;定義迷宮大小
 	tempX     db 0
 	tempY     db 0
 
-	fogArr db 9 ; 用於可視化地圖, 紀錄每次 player 移動後的可視位置
-	
+	fogArr equ 9 ; 用於可視化地圖, 紀錄每次 player 移動後的可視位置
+	fogSize equ 3 ; 設定迷霧大小 以正方形的邊長表示, 上面的 fodArr 則需是 fogSize^2, 最好是 '奇數' 這樣才有中心點
 data ends
 
-stack segment stack
+stack segment stack ; 沒有用到內建的 stack, 會放這個純粹因為 不寫 stack segment 每次 run masm code 時 他會在 terminal 跳一行 warning 很煩
     dw 128 dup(?)
 stack ends
 
@@ -351,10 +351,20 @@ shuffleDirection PROC
 shuffleDirection ENDP
 
 printMap PROC
+
+	; 在每次執行列印地圖時 手動換一次行, 原因 : terminal 的輸出上限是 24, 但計算上限不知為何是 23 導致 如果想要遊戲正常 我只能讓地圖大小為 23*23
+	; 但這樣每次在列印時 最上面一行會變成 上一次列印的地圖之最後一行, 於是在這邊手動換行, 土方解決
+	mov ah, 02h
+	mov dl, 0Dh
+	int 21h
+	mov dl, 0Ah
+	int 21h
 	; 根據 MAZE_ROWS * COLS, 每到基數就換行 用輸出字元的 逐個輸出
 
 	; 用 cx 紀錄當前row, bx 紀錄 col -> ax要留著做乘法 , dx 中的 dl 會用來輸出 所以選 c & b
 
+    ; 每次開始之前 1. 算出當前玩家位置的可視地圖, 2.改變可視地圖, 3.印出可視地圖
+    
 	mov cx, 0 ; 從0開始
 
 	resetCol:
@@ -374,7 +384,7 @@ printMap PROC
 		add ax, bx ; + y
 		mov si, ax ; 把 最後的得到第幾位的數字放進 si 當索引
 
-		mov dl, mazeMap[si] ; 印出當前位置的值
+		mov dl, visibleMap[si] ; 印出當前位置的值
 		mov ah, 02h
 		int 21h
 		
@@ -403,8 +413,10 @@ printMap ENDP
 waitKey PROC
     
     waitKeyLoop:
-		call calculateVisible;
+
+		call calculateVisible
         call printMap
+
         mov ah, 07h ; 註 (2) 07h: 鍵盤輸入(無回顯) AL = 輸入字符
         int 21h
         
@@ -650,7 +662,7 @@ waitKey PROC
             ret
 waitKey ENDP
 
-; 用於每次移動前計算的玩家當前位置可視範圍
+; 用於每次移動前計算的玩家當前位置可視範圍 (已經看過的區域則會恆亮 -> 降低遊戲難度)
 calculateVisible PROC
 
 	; 流程 -> 計算 index = playerX * col_size + y 先得到位置 再依序放進 減一個(col_size + 1) 得到左上角 以此類推
@@ -667,11 +679,74 @@ calculateVisible PROC
 	mov bl, playerY
 	mov bh, 0
 	
-	add ax, bx
-	mov bx, ax
+	add ax, bx ; 加上 y 的位移量
+	mov cx, ax ; 移到 cx 備用 (玩家當前位置)
+
+    ; 將基準點放在 bx 上 根據 -1, +1 位移量來得到他左邊跟右邊的 3P5 中的 3 和 5
+
+	; 再來是拿出 mazpMap[index] 中 實際的值 覆蓋在 visible 中 直接改變可視地圖 -> 就可以完成 已經看過的區域則保持恆亮, 未探索的區域則依舊是 '?' 的實作
+
+	mov di, fogSize ; 讀取設定的迷霧大小
+	; 因 在定義時提到的 fogSize 最好設定為奇數, 那可以 用 (總邊長 - 1) / 2  來找到需要上下位移的位移量.
+	; Ex. 如果是邊長是 3 , 玩家的可視範圍應是 自身為中心的 3*3 九塊格子, 以自身為基準 上下皆須偏移 1 邊長.
+
+	dec di ; di -= 1
+    ; DIV : (1) AX = DX:AX / r/m; resulting DX = remainder. (2) AL = AX / r/m; resulting AH = remainder
+    ; 根據 DIV 定義 (2) 得到 AL = AX / r/m; 表示 div r/m 是讓 AL/ (r/m) 而不是 我將除數寫入 al 當分母用
+    ; 所以要先把需要被除的資料 (fogSize) 移到 al -> mov di = 2 再做除法, 且 al 為商 , ah 為餘 這樣的話應該是不用先減, 直接做除法也可以, 為了避免報錯還是有自己手動操作就是了
+
+    mov ax, di ; ax 原本是 3P5中的 3 借放到 dx, ax要拿去做除法
+    mov di, 2
+    
+    div di ; al = fogSize / 2 
+    
+    ; 因為 di 是 16 bit 要移上去之前 先把 ah (餘數) 清空, 放 商 進去就好
+    mov ah, 0
+    mov di, ax ; 把最後得到的商拿回來 以 fogSize = 3 為例子, 這裡應該是 1 得到所需的偏移量
 	
+    ; 我在想的方法是 di = 1 , 我把他存起來 做 +/-(di) , dec di -> di = 0 再做 di = 0. 每次執行完一圈 就 dec di until 0 (要在proc 尾巴判斷 不然 0 不會處理)
+    ; 這樣當 di = 2, 3 以上 應該都能一樣處理
+
+	fogLoop:
+		
+        mov dx, di ; 把 剩下的偏移量移至 dx
+        
+        mov ax, MAZE_COLS ; 準備算出當前單位偏移量的位移, 拿 colSize 做乘法
+        mul dx ; ax = ax*dx 
+
+		; register - register :  SUB 在 wiki 中的 定義 (1) : r -= r/m/imm;
+		; 先幫 cx 當前位置 做備份
+		mov bx, cx ; bx = cx 備份
+		;用 bx 根據偏移量改變地圖
+
+		sub bx, ax ; 當前位置 - 偏移量
+
+		mov si, bx
+		dec si
+        mov al, mazeMap[si] ; si = bx - 1 做的跟前面的註解說的一樣
+		mov visibleMap[si], al
+		
+		inc si
+		mov al, mazeMap[si]
+		mov visibleMap[si], al
+
+		inc si
+		mov al, mazeMap[si]
+		mov visibleMap[si], al
+
+        cmp di, 0 ; 先判斷這輪是不是 0 了 代表 0 處理完畢了 不是的話 接著 -- 處理下一輪
+        jl endLoop
+		dec di
+        jmp fogLoop
+
+		endLoop:
+			ret
 	
-	
+
+		; 這段的結論 : 原本多加一個 fogSize 的初衷, 是為了之後的擴展性, 可讓玩家自定義迷霧大小或者根據遊戲難度調整, 但因應 MASM 的輸出上限 只有 23*23
+		; 如果還能調整迷霧大小, 會讓遊戲變得太容易, 也算替我節省一點時間了. 
+		; 這也是這段沒有加上 visibleMap 地圖改變之合法性判斷, 因為只能看到3*3的情況下, 且 地圖在建立之初 就將 最外圍一圈設定為牆. 導致不管怎麼樣 都不可能改變超出 visibleMap 陣列範圍的東西.
+
 calculateVisible ENDP
 
 

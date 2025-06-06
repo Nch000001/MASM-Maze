@@ -1,7 +1,7 @@
 data segment ;定義迷宮大小
 
-	MAZE_ROWS equ 21
-	MAZE_COLS equ 21
+	MAZE_ROWS equ 24 ; 24是 terminal 上限 可以更寬 但不能更長 row 不能再長了
+	MAZE_COLS equ 24
 	MAZE_SIZE equ MAZE_ROWS * MAZE_COLS ; 行*列 寫死 30*30
 
 	; 想法是分成兩個地圖 實際地圖與玩家可視範圍
@@ -15,8 +15,8 @@ data segment ;定義迷宮大小
 	playerY db 1 ; col : (0, 0) 是牆
 
 	; 終點座標
-	goalX db 19 ; row
-	goalY db 19 ; col (28, 28)
+	goalX db 22 ; row
+	goalY db 22 ; col (28, 28)
 
 	; 牆壁 = '#', 路 = '.', 不可視範圍 = '?', 玩家 = 'P', 終點 = 'O' 沒有為什麼 就是看起來很像一個洞.
 	; 定義符號
@@ -45,6 +45,8 @@ data segment ;定義迷宮大小
 	tempX     db 0
 	tempY     db 0
 
+	fogArr db 9 ; 用於可視化地圖, 紀錄每次 player 移動後的可視位置
+	
 data ends
 
 stack segment stack
@@ -271,8 +273,8 @@ makeMazeMap PROC
 
 	DFS_DONE:
 
-        mov playerX, 2
-        mov playerY, 2
+        mov playerX, 1
+        mov playerY, 1
 		mov al, playerX ; 設起點
 		mov ah, 0
 		mov bx, MAZE_COLS
@@ -301,8 +303,8 @@ makeMazeMap PROC
 		
 makeMazeMap ENDP
 
-; 為DFS取得隨機方向
-getRandomDirection PROC
+; 原本是給 隨機選擇方向用的 現在改拿來做洗牌器 總之回傳值是 0~3 放在 al
+getRandomDirection PROC 
 
 	mov ah, 2Ch ; 2CH = 獲取系統時間, CH = hour, CL = minute, DH = second, DL = hundredths
 	int 21h
@@ -401,18 +403,27 @@ printMap ENDP
 waitKey PROC
     
     waitKeyLoop:
+		call calculateVisible;
         call printMap
         mov ah, 07h ; 註 (2) 07h: 鍵盤輸入(無回顯) AL = 輸入字符
         int 21h
         
-        cmp al, 77h
+        cmp al, 57h ; W
         je pressW
-        ; cmp al, 'A'
-        ; je pressA
-        ; cmp al, 'S'
-        ; je pressS
-        ; cmp al, 'D'
-        ; je pressD
+		cmp al, 77h ; w
+		je pressW
+        cmp al, 41h ; A
+        je pressA
+		cmp al, 61h ; a
+		je pressA
+        cmp al, 53h ; S
+		je pressS
+		cmp al, 73h ; s
+        je pressS
+        cmp al, 44h ; D
+		je pressD
+		cmp al, 64h ; d
+        je pressD
         jmp waitKeyLoop ; 按非法按鍵
 
         ; 在每一個輸入之後先檢查 X + 位移 & Y + 位移 會不會 = 牆 再考慮移動
@@ -469,10 +480,253 @@ waitKey PROC
             mov al, player
             mov mazeMap[bx], al ; 改動地圖內的值
             jmp waitKeyLoop
-        
+
+
+        pressA: ; A (0, -1)
+            mov al, playerX
+			mov ah, 0
+			
+            mov bx, MAZE_COLS ; x * col_size
+            mul bx
+            
+            mov bl, playerY ; A = (0, -1) , 'A' 是 移動 Y 所以要移到 nextY 預留等著改變 playerY
+            mov bh, 0
+			dec bl ; y--
+			mov nextY, bl
+			
+            add ax, bx 
+            
+            mov bx, ax ; bx = 下一步在陣列中的實際位置
+            
+            mov al, wall
+            cmp mazeMap[bx], al
+            je waitKeyLoop
+
+            mov al, goal
+            cmp mazeMap[bx], al ; 其實往左應該不會有是終點的問題，終點預設寫在 (size-2, size-2) 不確定會不會改, 但會有死路的問題 (理論上)
+            je gameOver
+            
+            ; 非牆也非終點 -> 有路
+            ; 先讓舊位置改成路, 然後 P 去新位置, 更新陣列 且 重畫地圖
+
+            ; 計算舊位置
+
+            mov cx, bx ; 先把算好的新位置存起來 再來算舊的
+
+            mov al, playerX
+            mov ah, 0
+            mov bx, MAZE_COLS
+            mul bx
+            
+            mov bl, playerY
+            mov bh, 0
+            
+            add ax, bx
+            mov bx, ax
+            
+            mov al, road ; 把舊位置改成牆
+            mov mazeMap[bx], al
+
+            ; 拿回剛剛存到 cx 的值
+            mov bx, cx
+
+            mov al, nextY ;  把 playerY 更新
+            mov playerY, al
+
+            mov al, player
+            mov mazeMap[bx], al ; 改動地圖內的值
+            jmp waitKeyLoop
+		
+		pressS: ; S (1, 0)
+            mov al, playerX
+            inc al ; x++
+            mov nextX, al ; 先放進 nextX -> 如果這位置可以用 最後要放進 playerX
+            
+            mov ah, 0
+            mov bx, MAZE_COLS
+            mul bx
+            
+            mov bl, playerY ; S = (1, 0) 所以 Y 保持原本的就好 只有 X 需要用 nextX 來做嘗試
+            mov bh, 0
+            add ax, bx
+            
+            mov bx, ax ; bx = 下一步在陣列中的實際位置
+            
+            mov al, wall
+            cmp mazeMap[bx], al
+            je waitKeyLoop
+
+            mov al, goal
+            cmp mazeMap[bx], al
+            je gameOver
+            
+            ; 非牆也非終點 -> 有路
+            ; 先讓舊位置改成路, 然後 P 去新位置, 更新陣列 且 重畫地圖
+
+            ; 計算舊位置
+
+            mov cx, bx ; 先把算好的新位置存起來 再來算舊的
+
+            mov al, playerX
+            mov ah, 0
+            mov bx, MAZE_COLS
+            mul bx
+            
+            mov bl, playerY
+            mov bh, 0
+            
+            add ax, bx
+            mov bx, ax
+            
+            mov al, road ; 把舊位置改成牆
+            mov mazeMap[bx], al
+
+            ; 拿回剛剛存到 cx 的值
+            mov bx, cx
+
+            mov al, nextX ;  把 playerX 更新
+            mov playerX, al
+
+            mov al, player
+            mov mazeMap[bx], al ; 改動地圖內的值
+            jmp waitKeyLoop
+			
+		pressD: ; D (0, 1)
+            mov al, playerX
+			mov ah, 0
+			
+            mov bx, MAZE_COLS ; x * col_size
+            mul bx
+            
+            mov bl, playerY ; D = (0, 1) , 'D' 是 移動 Y 所以要移到 nextY 預留等著改變 playerY
+            mov bh, 0
+			inc bl ; y++
+			mov nextY, bl
+			
+            add ax, bx 
+            
+            mov bx, ax ; bx = 下一步在陣列中的實際位置
+            
+            mov al, wall
+            cmp mazeMap[bx], al
+            je waitKeyLoop
+
+            mov al, goal
+            cmp mazeMap[bx], al ; 其實往左應該不會有是終點的問題，終點預設寫在 (size-2, size-2) 不確定會不會改, 但會有死路的問題 (理論上)
+            je gameOver
+            
+            ; 非牆也非終點 -> 有路
+            ; 先讓舊位置改成路, 然後 P 去新位置, 更新陣列 且 重畫地圖
+
+            ; 計算舊位置
+
+            mov cx, bx ; 先把算好的新位置存起來 再來算舊的
+
+            mov al, playerX
+            mov ah, 0
+            mov bx, MAZE_COLS
+            mul bx
+            
+            mov bl, playerY
+            mov bh, 0
+            
+            add ax, bx
+            mov bx, ax
+            
+            mov al, road ; 把舊位置改成牆
+            mov mazeMap[bx], al
+
+            ; 拿回剛剛存到 cx 的值
+            mov bx, cx
+
+            mov al, nextY ;  把 playerY 更新
+            mov playerY, al
+
+            mov al, player
+            mov mazeMap[bx], al ; 改動地圖內的值
+            jmp waitKeyLoop
+
         gameOver:
             ret
 waitKey ENDP
+
+; 用於每次移動前計算的玩家當前位置可視範圍
+calculateVisible PROC
+
+	; 流程 -> 計算 index = playerX * col_size + y 先得到位置 再依序放進 減一個(col_size + 1) 得到左上角 以此類推
+
+	;	0	1	2
+	;	3	P	5
+	;	6	7	8
+
+	mov al, playerX
+	mov ah, 0
+	mov bx, MAZE_COLS
+	mul bx ; ax = x * col_size
+	
+	mov bl, playerY
+	mov bh, 0
+	
+	add ax, bx
+	mov bx, ax
+	
+	
+	
+calculateVisible ENDP
+
+
 code ends
 ; code區段結束
 end start ; 從start開始
+
+
+; 以下是第一版的列印地圖 意在 印出整張地圖 (全看的到), 主要做 -> 地圖算法和位移確認用. 
+; printMap PROC
+; 	; 根據 MAZE_ROWS * COLS, 每到基數就換行 用輸出字元的 逐個輸出
+
+; 	; 用 cx 紀錄當前row, bx 紀錄 col -> ax要留著做乘法 , dx 中的 dl 會用來輸出 所以選 c & b
+
+; 	mov cx, 0 ; 從0開始
+
+; 	resetCol:
+	
+; 		; 檢查條件, row 到上限了沒
+; 		cmp cx, MAZE_ROWS
+; 		je endPrint
+
+; 		mov bx, 0 ; 重置 col
+
+; 	nextCol:
+		
+; 		; 同 2. -> 若要得到 mazeMap[playerX][playerY] 的值, 因為是用陣列模擬, 所以把二維陣列用一維陣列的方式處理 => index = col_size * x + y
+; 		mov ax, cx
+; 		mov dx, MAZE_COLS
+; 		mul dx
+; 		add ax, bx ; + y
+; 		mov si, ax ; 把 最後的得到第幾位的數字放進 si 當索引
+
+; 		mov dl, mazeMap[si] ; 印出當前位置的值
+; 		mov ah, 02h
+; 		int 21h
+		
+; 		inc bx ; y++
+; 		cmp bx, MAZE_COLS  ; 比對到上限了沒
+; 		jl nextCol
+; 		jmp nextRow
+
+; 	nextRow:
+
+; 		; 換行 -> CR = 13 = 0D, LF = 10 = 0A
+; 		mov ah, 02h
+; 		mov dl, 0Dh
+; 		int 21h
+; 		mov dl, 0Ah
+; 		int 21h
+
+; 		inc cx ; x++
+; 		jmp resetCol
+
+; 	endPrint:
+; 		ret
+
+; printMap ENDP

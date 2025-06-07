@@ -15,8 +15,8 @@ data segment ;定義迷宮大小
 	playerY db 1 ; col : (0, 0) 是牆
 
 	; 終點座標
-	goalX db 2 ; row
-	goalY db 2 ; col (23, 23)
+	goalX db 21 ; row
+	goalY db 21; col (23, 23)
 
 	; 牆壁 = '#', 路 = '.', 不可視範圍 = '?', 玩家 = 'P', 終點 = 'O' 沒有為什麼 就是看起來很像一個洞.
 	; 定義符號
@@ -31,8 +31,8 @@ data segment ;定義迷宮大小
 	stackY db 1024 dup(0);
 	pointer db 1 dup(1); 目前剩餘次數
 
-	directionX db -1, 1, 0, 0 ; 定義四種方向 上下左右 (1, 0), (-1, 0), (0, -1), (0, 1)
-	directionY db 0, 0, -1, 1 
+	directionX db 1, -1, 0, 0 ; 定義四種方向 上下左右 (1, 0), (-1, 0), (0, -1), (0, 1)
+	directionY db 0, 0, -1, 1
 
 	nextX db 1 ; PWN 的 N
 	nextY db 1
@@ -56,6 +56,26 @@ data segment ;定義迷宮大小
 	redWall db 27, "[31m", '$' ; 27寫在外面 因為我們需要保留他的 ASCII -> ESC , 31m 則是紅色的前景色代碼
     blueGoal db 27, "[1;34m", '$' ; 藍色看起來像傳送門, 跟 O 很搭
 	resetColor db 27, "[0m", '$' ; 重設所有屬性用ESC[0m
+
+	; 理論上固定終點中就有可能無解, 做一個 BFS 來搭配 根據最遠距離放入終點
+	isVisited db MAZE_SIZE dup(0) ; 標記拜訪與否
+	queueX db 1024 dup(0)
+	queueY db 1024 dup(0)
+	queueDistance db 1024 dup(0)
+	currentX db 0
+	currentY db 0
+	currentDistance db 0 ; 當前距離
+	maxDistance db 0 ; 放最遠的地方
+	head db 0
+	tail db 0
+	
+	startColor db 27, "[32m", '$'
+	startMsg db 13, 10,"Welcome to the game. Use W, A, S, D to move around.", 13, 10, '$' ; 13 10 = CR LF
+	startMsg2 db 13, 10,"Try to find the goal, it will look like a ", '$'
+	startMsg3 db ". Press any key to start.", 13, 10, '$'
+
+	winColor db 27, "[36m", '$'
+	winMsg db "Congratulations! You won the game. Press any key to exit", '$'
 	
 data ends
 
@@ -69,51 +89,90 @@ code segment
 start:
 
 	call init ; 初始化
-
 	call makeMazeMap ; 製作地圖
-	;call printMap ; 列印
+	
     call waitKey
+
 	mov ax, 4c00h
 	int 21h
 
 init PROC
 	mov ax, data
 	mov ds, ax
+
+	; 更改字體顏色
+	lea dx, startColor ;
+	mov ah, 09h
+	int 21h
+	
+	lea dx, startMsg ; 開始訊息
+	mov ah, 09h
+	int 21h
+	
+	lea dx, startMsg2 ; 開始訊息
+	mov ah, 09h
+	int 21h
+
+	lea dx, blueGoal
+	mov ah, 09h
+	int 21h
+
+	mov dl, 'O'
+	mov ah, 02h
+	int 21h
+
+	lea dx, resetColor ; 重設所有屬性
+	mov ah, 09h
+	int 21h
+
+	lea dx, startColor ;
+	mov ah, 09h
+	int 21h
+	
+	lea dx, startMsg3 ; 開始訊息
+	mov ah, 09h
+	int 21h
+
+	
+	mov ah, 07h ; 等待輸入 (任何按鍵)
+	int 21h
 	ret
 init ENDP
 
 ; 因為不使用recursive, 實際用陣列來模擬且操作, 大致演算法 => 
-; 把玩家起始位置放進陣列 且 
-; 執行LOOP直到陣列為空 : 1. 將位址取出, 2. 此位址尚未造訪則 = '.' (路) : 
-; 3. 重複隨機選取一個方向: 假設 P W N  , P 為當前位置 WN皆為牆, 只要符合 N 為未造訪 且 W 為牆 兩個條件, 就將WN設為'路' 且 N 為下一次迴圈起點
-; 4. 若該方向的下兩格皆為牆, 將中間的牆改為路 且 將第二格放進陣列 ;
+; 把玩家起始位置放進陣列 且 執行LOOP直到陣列為空 : 
+; 1. 將起始位置放入陣列 設為路 = '.', 
+; 2. 打亂Direction排序, 每次皆從 0 ~ 3 依次選取方向 
+; 3. 根據當前方向 -> 假設 P W N  , P 為當前位置, 只要符合 N 為未造訪 且 WN 皆為牆 兩個條件, 就將WN設為'路' 且 N 為下一次迴圈起點
+; 4. 將 合法的 N 放入陣列 (stackX & stackY), 接著先繼續處理其他未看過的方向
 makeMazeMap PROC
 
+    call shuffleDirection ; 在一開始就先洗一次方向 不然在最開始的區域幾乎都長一樣
+
 	; 把玩家起始位置放進陣列
-    mov playerX, 1
-    mov playerY, 1
-    
-    mov ax, 1
-    mov bx, MAZE_COLS
+	mov al, playerX 
+    mov ah, 0
+    mov bx, MAZE_COLS ; 玩家起始位置 * colSize
     mul bx
-    add ax, 1
-    mov si, ax
+
+	mov bl, playerY 
+	mov bh, 0
+	add ax, bx ; 加上 y 的偏移量
+
+    mov si, ax ; 放進 si 當索引
     mov al, road
-    mov mazeMap[si], al
+    mov mazeMap[si], al ; 將起始位置設成路
 
-	mov al, playerX
+	mov al, playerX ; 放進陣列
     mov stackX[0], al
-
     mov al, playerY
     mov stackY[0], al
 
-    mov byte ptr [pointer], 1
-
-
+    mov pointer, 1 ; 設定 pointer 起始 為 1 ( 一開始只有'起始位置'一個內容)
 
 	DFS:
 		; 執行LOOP直到陣列為空
-		mov al, [pointer]
+		mov al, pointer
 		cmp al, 0
 		je DFS_DONE
 
@@ -127,165 +186,140 @@ makeMazeMap PROC
 
 		mov al, stackY[bx] ; 同上述步驟
 		mov playerY, al
-
-		; ; 2. 此位址尚未造訪則 = '.' (路)
-		; ; 若要得到 mazeMap[playerX][playerY] 的值, 因為是用陣列模擬, 所以把二維陣列用一維陣列的方式處理 => index = col_size * x + y
-		; mov al, playerX
-		; mov ah, 0 ; 手動分開操作高半位和低半位的理由和上述的 pointer 一致
-		; mov bx, MAZE_COLS
-		; mul bx ; ax = ax*bx 得到 col_size * x 
 		
-		; ; 接下來處理 + y
-		; mov bl, playerY
-		; mov bh, 0
-		; add ax, bx ; ax = ax + bx
-		; mov si, ax ; 放到 si 當索引 待會使用 mazeMap[si]
-
-		; mov al, mazeMap[si]
-		; cmp al, wall
-		; jne DFS ; 比較如果 al 的內容不是牆 則代表以造訪過 跳過這輪
-		
-		; mov al, road
-		; mov mazeMap[si], al ; 不允許 destination & source 同時為記憶體位址 所以要兩步操作, 先將路的內容放進al, 再將al放進地圖裡
-		
-		; 3. 隨機選取一個方向 用下方的 getRandomDirection 來實現
-		; 拿到餘數表示第幾組 再從 directionX & Y [al] 中 來得到方向 從'方向'陣列內容->影響DFS要前進的方向
-		; 應加上判斷是否為迷宮外牆 (如果本身要外面一圈必定為牆的話) 或者 在一開始就限制direc的活動範圍 只在 1 ~ size-2
-		
+		; 2. 打亂Direction排序, 每次皆從 0 ~ 3 依次選取方向
 		call shuffleDirection ; 再每次要選方向的時候, 先打亂 direction 裡 存放的方向順序, 不是每次都上下左右
 
-		mov si, 0 ; 從 direction[0] 開始 ~ [3]
+		mov si, 0 ; 從 direction[0] 開始 ~ [3] 之索引
 
-		newDirection:
+	newDirection:
 
-			;call getRandomDirection
+		cmp si, 4
+		je DFS ; 代表所有方向都嘗試過
+		
+		; 因為 dircetion 裡面有 -1 的值 用一般的處理方式 當dir是負值時會有bug (親身體會)
+		; cbw : Convert byte to word.		from wiki -> x86 instruction listings
+		; imul : Two-operand non-widening integer multiply.
 
-			; ; 回傳的放在al, 先將ah設成0 合併成 16bits -> ax 放進索引
-			; mov ah, 0
-			; mov si, ax
+		; 3. 先找到 PWN 中的 P
+		mov al, directionX[si] 
+		cbw  
+		mov bl, 2
+		imul bl ; 根據上面的 PWN 例子 先將方向的位移量*2 得到 N 
 
-			cmp si, 4
-			je DFS ; 代表所有方向都嘗試過
-			
-			; 因為 dircetion 裡面有 -1 的值 用一般的處理方式 當dir是負值時會有bug (親身體會)
-			; cbw: Convert byte to word.								 from wiki -> x86 instruction listings
-			; imul : Two-operand non-widening integer multiply.
-			mov al, directionX[si] 
-			cbw  
-			mov bl, 2
-			imul bl ; 根據上面的 PWN 例子 先將方向的位移量*2 得到 N 
+		mov bl, playerX ; 再將另一個要素取出 相加之後 就是實際位移後的位置
+		add al, bl 
+		mov nextX, al ; 預移動的新位置, 放進next判斷位置是否合法
+		
+		mov al, directionY[si]
+		cbw
+		mov bl, 2
+		imul bl ; 同 X 的操作
+		
+		mov bl, playerY
+		add al, bl
+		mov nextY, al ; y軸處理完畢->接下來判斷是不是在合法位置 不是就重來 (1 ~ size-2)
 
-			mov bl, playerX ; 再將另一個要素取出 相加之後 就是實際位移後的位置
-			add al, bl 
-			mov nextX, al ; 預移動的新位置, 放進next判斷位置是否合法
-			
-			mov al, directionY[si]
-			cbw
-			mov bl, 2
-			imul bl ; 同 X 的操作
-			
-			mov bl, playerY
-			add al, bl
-			mov nextY, al ; y軸處理完畢->接下來判斷是不是在合法位置 不是就重來 (1 ~ size-2)
+		; 因為 WN 的差距只有 位移量多1 但都是同個方向 所以只要 更前面的N合法 W 自然合法 -> 只檢查N合法與未造訪(牆) -> 再檢查 W 牆否
+		mov al, nextX ; 用 next去檢查移動後的位置是否合法
+		cmp al, 1 ; [0][y]
+		jb skipDirection ; 不合法 -> 跳過這個方向
+		cmp al, MAZE_ROWS - 2 ; [size-2][y]
+		ja skipDirection
 
-			; 因為 WN 的差距只有 位移量多1 但都是同個方向 所以只要 更前面的N合法 W 自然合法 -> 只檢查N合法與未造訪(牆) -> 再檢查 W 牆否
-			mov al, nextX ; 用 next去檢查移動後的位置是否合法
-			cmp al, 1 ; [0][y]
-			jb skipDirection ; 不合法 -> 跳過這個方向
-			cmp al, MAZE_ROWS - 2 ; [size-2][y]
-			ja skipDirection
+		mov al, nextY
+		cmp al, 1 ; [x][0]
+		jb skipDirection
+		cmp al, MAZE_COLS - 2 ; [x][size-2]
+		ja skipDirection
+		
+		; 經過上面測試代表 -> 接下來的位置合法, 檢查是不是牆, 用上面 2. 方法檢查 
+		mov al, nextX
+		mov ah, 0 ; 手動分開操作高半位和低半位的理由和上述的 pointer 一致
+		mov bx, MAZE_COLS
+		mul bx ; ax = ax*bx 得到 col_size * x 
+		
+		; 接下來處理 + y
+		mov bl, nextY
+		mov bh, 0
+		add ax, bx ; ax = ax + bx
+		mov bx, ax ; 移回 bx 當索引 待會使用 mazeMap[bx] 不跟 2. 一樣用 si 當索引的原因是 -> si 在 迴圈初始時 被用來存放 randomDirection 的回傳值, 之後也還需使用到 所以改用 bx 作為索引
 
-			mov al, nextY
-			cmp al, 1 ; [x][0]
-			jb skipDirection
-			cmp al, MAZE_COLS - 2 ; [x][size-2]
-			ja skipDirection
-			
-			; 經過上面測試代表 -> 接下來的位置合法, 檢查是不是牆, 用上面 2. 方法檢查 
-			mov al, nextX
-			mov ah, 0 ; 手動分開操作高半位和低半位的理由和上述的 pointer 一致
-			mov bx, MAZE_COLS
-			mul bx ; ax = ax*bx 得到 col_size * x 
-			
-			; 接下來處理 + y
-			mov bl, nextY
-			mov bh, 0
-			add ax, bx ; ax = ax + bx
-			mov bx, ax ; 移回 bx 當索引 待會使用 mazeMap[bx] 不跟 2. 一樣用 si 當索引的原因是 -> si 在 迴圈初始時 被用來存放 randomDirection 的回傳值, 之後也還需使用到 所以改用 bx 作為索引
+		mov al, mazeMap[bx]
+		cmp al, wall
+		jne skipDirection ; 不是牆代表造訪過 下一輪
 
-			mov al, mazeMap[bx]
-			cmp al, wall
-			jne skipDirection ; 不是牆代表造訪過 下一輪
+		; 確定 N 合法且牆 檢查 W
+		mov al, directionX[si] ; 先把當前玩家加上位移放進 牆的位置
+		mov bl, playerX
+		add al, bl
+		mov wallX, al
 
-			; 確定 N 合法且牆 檢查 W
-			mov al, directionX[si] ; 先把當前玩家加上位移放進 牆的位置
-			mov bl, playerX
-			add al, bl
-			mov wallX, al
+		mov al, directionY[si]
+		mov bl, playerY
+		add al, bl
+		mov wallY, al ; (wallX, wallY) 為 W 的位置 -> 檢查是否為牆, 一樣根據 2. 的方法
 
-			mov al, directionY[si]
-			mov bl, playerY
-			add al, bl
-			mov wallY, al ; (wallX, wallY) 為 W 的位置 -> 檢查是否為牆, 一樣根據 2. 的方法
+		mov al, wallX
+		mov ah, 0 ; 手動分開操作高半位和低半位的理由和上述的 pointer 一致
+		mov bx, MAZE_COLS
+		mul bx ; ax = ax*bx 得到 col_size * x 
+		
+		; 接下來處理 + y
+		mov bl, wallY
+		mov bh, 0
+		add ax, bx ; ax = ax + bx
+		mov bx, ax ; 移回 bx 當索引 待會使用 mazeMap[bx] 不跟 2. 一樣用 si 當索引的原因是 -> si 在 迴圈初始時 被用來存放 randomDirection 的回傳值, 之後也還需使用到 所以改用 bx 作為索引
 
-			mov al, wallX
-			mov ah, 0 ; 手動分開操作高半位和低半位的理由和上述的 pointer 一致
-			mov bx, MAZE_COLS
-			mul bx ; ax = ax*bx 得到 col_size * x 
-			
-			; 接下來處理 + y
-			mov bl, wallY
-			mov bh, 0
-			add ax, bx ; ax = ax + bx
-			mov bx, ax ; 移回 bx 當索引 待會使用 mazeMap[bx] 不跟 2. 一樣用 si 當索引的原因是 -> si 在 迴圈初始時 被用來存放 randomDirection 的回傳值, 之後也還需使用到 所以改用 bx 作為索引
+		mov al, mazeMap[bx]
+		cmp al, wall
+		jne skipDirection ; W不是牆就不符合建立的原則 下一輪
 
-			mov al, mazeMap[bx]
-			cmp al, wall
-			jne skipDirection ; W不是牆就不符合建立的原則 下一輪
+		; 以上判斷完 把 W 打通 把 N 放進下一個執行位置
+		mov al, road
+		mov mazeMap[bx], al
 
-			; 以上判斷完 把 W 打通 把 N 放進下一個執行位置
-			mov al, road
-			mov mazeMap[bx], al
+		; 再打通N
+		mov al, nextX
+		mov ah, 0
+		mov bx, MAZE_COLS
+		mul bx
 
-            ; 再打通N
-            mov al, nextX
-            mov ah, 0
-            mov bx, MAZE_COLS
-            mul bx
+		mov bl, nextY
+		mov bh, 0
+		add ax, bx
+		
+		mov bx, ax
+		mov al, road
+		mov mazeMap[bx], al
 
-            mov bl, nextY
-            mov bh, 0
-            add ax, bx
-            
-            mov bx, ax
-            mov al, road
-            mov mazeMap[bx], al
+		; 4. 把 nextX & Y 的位置給實際的 player 做下一次的移動
+		mov al, nextX
+		mov playerX, al
+		mov bl, [pointer]
+		mov bh, 0
+		mov stackX[bx], al ; 放進stack 等待下一輪操作
 
-			; 把 nextX & Y 的位置給實際的 player 做下一次的移動
-			mov al, nextX
-			mov playerX, al
-			mov bl, [pointer]
-            mov bh, 0
-			mov stackX[bx], al ; 放進stack 做下一輪操作
+		mov al, nextY
+		mov playerY, al
+		mov stackY[bx], al
 
-			mov al, nextY
-			mov playerY, al
-			mov stackY[bx], al
+		; 加上 pointer 的次數 (表示 stack 裡新增一個元素) -> 接著回到迴圈開頭繼續下一個方向
+		inc pointer
+		jmp skipDirection
 
-			; 加上 pointer 的次數 開啟下一次迴圈
-			inc pointer
-			jmp skipDirection
-
-		skipDirection:
-
-			inc si ; 為什麼不用 loop newDirection 而是 手動 --cx 然後 jnz:  error A2075: jump destination too far : by 60 byte(s) 
-			jnz newDirection ; 因為寫太長 超過loop範圍了 XD
+	skipDirection: ; 遇到不符合原則的 直接將 索引 + 1 , 嘗試下一個方向
+	
+		inc si ; 為什麼不用 loop newDirection 而是 手動 --cx 然後 jnz:  error A2075: jump destination too far : by 60 byte(s) 
+		jnz newDirection ; 因為寫太長 超過loop範圍了 XD
 
 	DFS_DONE:
 
-        mov playerX, 1
+		; 因為前面都有用playerX跟Y 來行動, 先重設他們到固定的起點
+        mov playerX, 1 
         mov playerY, 1
-		mov al, playerX ; 設起點
+		
+		mov al, playerX 
 		mov ah, 0
 		mov bx, MAZE_COLS
 		mul bx
@@ -296,6 +330,8 @@ makeMazeMap PROC
 		mov si, ax
 		mov al, player
 		mov mazeMap[si], al
+
+		call findGoal
 
 		mov al, goalX ; 終點
 		mov ah, 0
@@ -330,12 +366,13 @@ getRandomDirection PROC
 
 getRandomDirection ENDP
 
+;洗牌器, 用來打亂 direction 陣列裡的方向排序
 shuffleDirection PROC
 	
 	mov si, 3 ; 設一個也在 direction[X] 範圍內的值 
 
 	shuffle:
-		call getRandomDirection ; 原本是給 隨機選擇方向用的 現在改拿來做洗牌器 總之回傳值是 0~3 放在 al
+		call getRandomDirection ; 回傳值是 0~3 放在 al
 
 		mov bl, al ; 回傳值併入 bx 當索引用
 		mov bh, 0
@@ -360,6 +397,7 @@ shuffleDirection PROC
 
 shuffleDirection ENDP
 
+;列印可視地圖
 printMap PROC
 
 	; 在每次執行列印地圖時 手動換一次行, 原因 : terminal 的輸出上限是 24, 但計算上限不知為何是 23 導致 如果想要遊戲正常 我只能讓地圖大小為 23*23
@@ -369,11 +407,12 @@ printMap PROC
 	int 21h
 	mov dl, 0Ah
 	int 21h
-	; 根據 MAZE_ROWS * COLS, 每到基數就換行 用輸出字元的 逐個輸出
 
+
+	; 根據 MAZE_ROWS * COLS, 每到基數就換行 用輸出字元的 逐個輸出
 	; 用 cx 紀錄當前row, bx 紀錄 col -> ax要留著做乘法 , dx 中的 dl 會用來輸出 所以選 c & b
 
-    ; 每次開始之前 1. 算出當前玩家位置的可視地圖, 2.改變可視地圖, 3.印出可視地圖
+    ; 印出可視地圖 且 根據 物件不同輸出不同顏色
     
 	mov cx, 0 ; 從0開始
 
@@ -387,7 +426,7 @@ printMap PROC
 
 	nextCol:
 		
-		; 同 2. -> 若要得到 mazeMap[playerX][playerY] 的值, 因為是用陣列模擬, 所以把二維陣列用一維陣列的方式處理 => index = col_size * x + y
+		; 因為是用陣列模擬, 所以把二維陣列用一維陣列的方式處理 => index = col_size * x + y
 		mov ax, cx
 		mov dx, MAZE_COLS
 		mul dx
@@ -404,10 +443,7 @@ printMap PROC
 		cmp ah, al
 		je isGoal
 
-		lea dx, resetColor ; 不在可視範圍的內容 用預設的黑色, 才不會有提前被看光的問題
-		mov ah, 09h
-		int 21h
-		jmp printChar
+		jmp printChar ; 都不是就直接去輸出
 
 	isWall:
 		lea dx, redWall
@@ -423,11 +459,15 @@ printMap PROC
 
 	printChar:
 		; 設定好顏色之後, 來這裡輸出
-		
+
 		mov dl, visibleMap[si] ; 印出當前位置的值
 		mov ah, 02h
 		int 21h
 		
+		lea dx, resetColor ; 每次輸出完就重設所有屬性
+		mov ah, 09h
+		int 21h
+
 		inc bx ; y++
 		cmp bx, MAZE_COLS  ; 比對到上限了沒
 		jl nextCol
@@ -450,8 +490,9 @@ printMap PROC
 
 printMap ENDP
 
+; 持續接收輸入直到到達終點或 按下 Q/q 退出: 判斷移動方向合法性 (牆, 路 還是 終點)
 waitKey PROC
-    
+	; 牆 -> 回去等輸入 ; 終點 -> 結束 ; 有路 -> 交換新位置與玩家位置
     waitKeyLoop:
 
 		call calculateVisible
@@ -476,6 +517,10 @@ waitKey PROC
 		je pressD
 		cmp al, 64h ; d
         je pressD
+		cmp al, 51h ; Q
+		je pressQ
+		cmp al, 71h ; q
+		je pressQ
         jmp waitKeyLoop ; 按非法按鍵
 
         ; 在每一個輸入之後先檢查 X + 位移 & Y + 位移 會不會 = 牆 再考慮移動
@@ -698,13 +743,38 @@ waitKey PROC
             mov mazeMap[bx], al ; 改動地圖內的值
             jmp waitKeyLoop
 
+		pressQ:
+			ret
         gameOver:
+
+			lea dx, resetColor ; 重設所有屬性
+			mov ah, 09h
+			int 21h
+			
+			lea dx, winColor ;青色
+			mov ah, 09h
+			int 21h
+
+			lea dx, winMsg
+			mov ah, 09h
+			int 21h
+
+			; 等待輸入
+			mov dl, 07h 
+			mov ah, 09h
+			int 21h
+
+			lea dx, resetColor ; 重設所有屬性
+			mov ah, 09h
+			int 21h
+
             ret
 waitKey ENDP
 
 ; 用於每次移動前計算的玩家當前位置可視範圍 (已經看過的區域則會恆亮 -> 降低遊戲難度)
+; 根據新的玩家位置, 更改可視地圖與原始地圖中交集的部分, 將可視地圖內的 '?' 改為 地圖實際內容
 calculateVisible PROC
-
+	
 	; 流程 -> 計算 index = playerX * col_size + y 先得到位置 再依序放進 減一個(col_size + 1) 得到左上角 以此類推
 
 	;	0	1	2
@@ -722,7 +792,7 @@ calculateVisible PROC
 	add ax, bx ; 加上 y 的位移量
 	mov cx, ax ; 移到 cx 備用 (玩家當前位置)
 
-    ; 將基準點放在 bx 上 根據 -1, +1 位移量來得到他左邊跟右邊的 3P5 中的 3 和 5
+    ; 將基準點放在 cx 上 根據 -1, +1 位移量來得到他左邊跟右邊的 3P5 中的 3 和 5
 
 	; 再來是拿出 mazpMap[index] 中 實際的值 覆蓋在 visible 中 直接改變可視地圖 -> 就可以完成 已經看過的區域則保持恆亮, 未探索的區域則依舊是 '?' 的實作
 
@@ -789,59 +859,121 @@ calculateVisible PROC
 
 calculateVisible ENDP
 
+; 從起點開始 用 queue 存 (x, y, 距離)
+; Loop 直到 queue 空 (head 跟 tail 碰到) -> dequeue 推出 currentX & Y 跟他們的距離 -> 透過比較最大距離決定更新與否
+; -> 對四個方向都檢查 : 如果合法 且 未訪問 -> 訪問 且 放進 queue (enqueue)
+findGoal PROC
+	; init queue
+	mov head, 0
+	mov tail, 1
+	mov queueX[0], 1 ; 因為起始位置應該不會有變動 這邊偷懶一下
+	mov queueY[0], 1
+	mov queueDistance[0], 0
+
+	; 把起點設成已造訪
+	mov ax, 1 ; 一樣偷懶
+	mov ah, 0
+	mov bx, MAZE_COLS
+	mul bx
+	add ax, 1
+
+	mov si, ax ; 放進 si 當索引
+	mov isVisited[si], 1
+
+	BFS:
+		
+		; 判斷 queue 的頭尾碰到了沒 檢查還有沒有東西
+		mov bl, head
+		cmp bl, tail
+		je BFS_DONE ; 空了結束
+		
+		; 取出 最新的資料
+		mov bh, 0 ; 這是因為剛剛 bl 已經是放頭了 直接改 bh 就好
+		mov al, queueX[bx]
+		mov currentX, al
+
+		mov al, queueY[bx]
+		mov currentY, al
+
+		mov al, queueDistance[bx]
+		mov currentDistance, al
+		
+		inc head ; head++
+		
+		; 比較剛拿到的有沒有比紀錄中的大
+		cmp al, maxDistance
+		jbe nothingChange ; jbe = below or equal -> 小於等於都跳過 表示這次嘗試沒有得到更大的距離
+		
+		; 大於則取代
+		mov maxDistance, al
+		mov al, currentX
+		mov goalX, al
+		mov al, currentY
+		mov goalY, al
+		jmp nothingChange
+
+	nothingChange:
+		mov di, 0 ; reset 方向索引
+		jmp nextDirection
+
+	nextDirection: ; DFS 已經有 newDirection 偷改一下
+		; 好像可以不寫 jmp 就在下一行 XD
+		
+		cmp di, 4
+		je BFS ; 四個方向都完成
+
+		; BFS 直接用固定的方向序列找都一樣
+		mov al, directionX[di]
+		mov ah, 0
+		add al, currentX ; 距離加方向, 跟 DFS 中 PWN 的例子不一樣 我不需要 * 負號, 直接加會對, 這樣之前的好像可以加兩次就好...
+		mov nextX, al
+
+		mov cl, directionY[di]
+		mov ch, 0
+		add cl, currentY
+		mov nextY, cl
+		
+		; 合法性可以檢查是不是路就好, 在DFS建立迷宮的時候就把外面一圈圍成牆, 而一次動一步的話 -> 只要是路就絕對合法
+		; al, cl 到這裡還是跟 nextX & Y 一樣
+		mov bx, MAZE_COLS
+		mul bx
+		add ax, cx
+		mov bx, ax
+
+		mov al, mazeMap[bx]
+		mov ah, road
+		cmp al, ah
+		jne skip ; 非路就跳過這個方向
+
+		; 合法就 檢查造訪與否 -> 紀錄座標 -> 放進 queue
+		cmp isVisited[bx], 1
+		je skip
+
+		mov isVisited[bx], 1 ; 紀錄座標
+		
+		; 放進 queue
+		mov bl, tail
+		mov bh, 0
+		mov al, nextX
+		mov queueX[bx], al
+
+		mov al, nextY
+		mov queueY[bx], al
+
+		mov al, currentDistance
+		inc al ; 多動了一步 要幫距離++
+		
+		mov queueDistance[bx], al
+		inc tail ; 資料 +1 筆
+
+	skip: ; DFS 那裡已經有一個 skipDirection 這邊改一下
+		inc di ; 索引++
+		jmp nextDirection
+	BFS_DONE:
+		ret
+
+findGoal ENDP
 
 code ends
 ; code區段結束
 end start ; 從start開始
-
-
-; 以下是第一版的列印地圖 意在 印出整張地圖 (全看的到), 主要做 -> 地圖算法和位移確認用. 
-; printMap PROC
-; 	; 根據 MAZE_ROWS * COLS, 每到基數就換行 用輸出字元的 逐個輸出
-
-; 	; 用 cx 紀錄當前row, bx 紀錄 col -> ax要留著做乘法 , dx 中的 dl 會用來輸出 所以選 c & b
-
-; 	mov cx, 0 ; 從0開始
-
-; 	resetCol:
-	
-; 		; 檢查條件, row 到上限了沒
-; 		cmp cx, MAZE_ROWS
-; 		je endPrint
-
-; 		mov bx, 0 ; 重置 col
-
-; 	nextCol:
-		
-; 		; 同 2. -> 若要得到 mazeMap[playerX][playerY] 的值, 因為是用陣列模擬, 所以把二維陣列用一維陣列的方式處理 => index = col_size * x + y
-; 		mov ax, cx
-; 		mov dx, MAZE_COLS
-; 		mul dx
-; 		add ax, bx ; + y
-; 		mov si, ax ; 把 最後的得到第幾位的數字放進 si 當索引
-
-; 		mov dl, mazeMap[si] ; 印出當前位置的值
-; 		mov ah, 02h
-; 		int 21h
-		
-; 		inc bx ; y++
-; 		cmp bx, MAZE_COLS  ; 比對到上限了沒
-; 		jl nextCol
-; 		jmp nextRow
-
-; 	nextRow:
-
-; 		; 換行 -> CR = 13 = 0D, LF = 10 = 0A
-; 		mov ah, 02h
-; 		mov dl, 0Dh
-; 		int 21h
-; 		mov dl, 0Ah
-; 		int 21h
-
-; 		inc cx ; x++
-; 		jmp resetCol
-
-; 	endPrint:
-; 		ret
-
-; printMap ENDP

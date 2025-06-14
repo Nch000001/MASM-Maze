@@ -1,6 +1,6 @@
 data segment ;定義迷宮大小
 
-	MAZE_ROWS equ 23 ; 24*24 是 terminal 上限 
+	MAZE_ROWS equ 23 ; 24 是 terminal 上限 
 	MAZE_COLS equ 23 ; 但我怎麼處理 23 都會是他計算的上限 超過 23 之後 會印出至多到第24行 但實際地圖運算只到 23 行
 	MAZE_SIZE equ MAZE_ROWS * MAZE_COLS ; 行*列 寫死 23*23
 
@@ -31,7 +31,7 @@ data segment ;定義迷宮大小
 	stackY db 1024 dup(0);
 	pointer db 1 dup(1); 目前剩餘次數
 
-	directionX db 1, -1, 0, 0 ; 定義四種方向 上下左右 (1, 0), (-1, 0), (0, -1), (0, 1)
+	directionX db -1, 1, 0, 0 ; 定義四種方向 上下左右 (-1, 0), (1, 0), (0, -1), (0, 1)
 	directionY db 0, 0, -1, 1
 
 	nextX db 1 ; PWN 的 N
@@ -70,12 +70,12 @@ data segment ;定義迷宮大小
 	tail db 0
 	
 	startColor db 27, "[32m", '$'
-	startMsg db 13, 10,"Welcome to the game. Use W, A, S, D to move around.", 13, 10, '$' ; 13 10 = CR LF
-	startMsg2 db 13, 10,"Try to find the goal, it will look like a ", '$'
-	startMsg3 db ". Press any key to start.", 13, 10, '$'
+	startMsg db 13, 10, 13, 10, 13, 10, 13, 10, 13, 10, 13, 10, 13, 10, 13, 10, 13, 10,"	Welcome to the game. Use W, A, S, D to move around.", 13, 10, 13, 10, '$' ; 13 10 = CR LF
+	startMsg2 db 13, 10,"	Try to find the goal, it will look like a ", '$'
+	startMsg3 db ". Press any key to start.", 13, 10, 13, 10, 13, 10, 13, 10, 13, 10, 13, 10, 13, 10, 13, 10, 13, 10, 13, 10, 13, 10, 13, 10, '$'
 
 	winColor db 27, "[36m", '$'
-	winMsg db "Congratulations! You won the game. Press any key to exit", '$'
+	winMsg db 13, 10, 13, 10, 13, 10, 13, 10, 13, 10, 13, 10, 13, 10, 13, 10, 13, 10, 13, 10, 13, 10,"		Congratulations! You won the game. ", 13, 10, '$'
 	
 data ends
 
@@ -146,8 +146,6 @@ init ENDP
 ; 3. 根據當前方向 -> 假設 P W N  , P 為當前位置, 只要符合 N 為未造訪 且 WN 皆為牆 兩個條件, 就將WN設為'路' 且 N 為下一次迴圈起點
 ; 4. 將 合法的 N 放入陣列 (stackX & stackY), 接著先繼續處理其他未看過的方向
 makeMazeMap PROC
-
-    call shuffleDirection ; 在一開始就先洗一次方向 不然在最開始的區域幾乎都長一樣
 
 	; 把玩家起始位置放進陣列
 	mov al, playerX 
@@ -349,8 +347,8 @@ makeMazeMap PROC
 		
 makeMazeMap ENDP
 
-; 原本是給 隨機選擇方向用的 現在改拿來做洗牌器 總之回傳值是 0~3 放在 al
-getRandomDirection PROC 
+; 根據系統時間得到回傳值 0~3 放在 al
+getRandom PROC 
 
 	mov ah, 2Ch ; 2CH = 獲取系統時間, CH = hour, CL = minute, DH = second, DL = hundredths
 	int 21h
@@ -364,7 +362,7 @@ getRandomDirection PROC
 	mov al, ah ; 將需要的結果移到 al
 	ret
 
-getRandomDirection ENDP
+getRandom ENDP
 
 ;洗牌器, 用來打亂 direction 陣列裡的方向排序
 shuffleDirection PROC
@@ -372,7 +370,7 @@ shuffleDirection PROC
 	mov si, 3 ; 設一個也在 direction[X] 範圍內的值 
 
 	shuffle:
-		call getRandomDirection ; 回傳值是 0~3 放在 al
+		call getRandom ; 回傳值是 0~3 放在 al
 
 		mov bl, al ; 回傳值併入 bx 當索引用
 		mov bh, 0
